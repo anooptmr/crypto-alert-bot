@@ -1,100 +1,87 @@
 import requests
-import pandas as pd
-import telegram
 import time
-import ta
+import os
+import telegram
+import threading
+from flask import Flask
+import pandas as pd
 
-# Your Telegram bot token and chat ID
-TELEGRAM_TOKEN = "7935117230:AAFF6FrTTXUP30LXWcoOicKf82S2lkEx_5A"
-CHAT_ID = "383365285"
-
+# === Telegram Setup ===
+TELEGRAM_TOKEN = '7935117230:AAFF6FrTTXUP30LXWcoOicKf82S2lkEx_5A'
+CHAT_ID = '383365285'
 bot = telegram.Bot(token=TELEGRAM_TOKEN)
 
-# List of pairs you want to monitor
-PAIRS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "ADAUSDT"]
+# === Flask Web Server to keep Render Free Tier alive ===
+app = Flask(__name__)
 
-# Binance API parameters
-INTERVAL = "15m"      # 15 minutes
-LIMIT = 100           # candles to fetch
+@app.route('/')
+def home():
+    return "Bot is running!"
 
-# Indicators parameters
-RSI_PERIOD = 9
-RSI_OVERSOLD = 30
-MACD_FAST = 12
-MACD_SLOW = 26
-MACD_SIGNAL = 9
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
 
-def fetch_klines(symbol, interval, limit):
+# === Crypto Alert Logic ===
+def fetch_klines(symbol, interval='1h', limit=100):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     try:
-        response = requests.get(url)
-        response.raise_for_status()
+        response = requests.get(url, timeout=10)
         data = response.json()
-        return data
-    except Exception as e:
-        print(f"Error fetching data for {symbol}: {e}")
+        df = pd.DataFrame(data, columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_asset_volume', 'number_of_trades',
+            'taker_buy_base', 'taker_buy_quote', 'ignore'
+        ])
+        df['close'] = df['close'].astype(float)
+        return df
+    except:
         return None
 
-def analyze_pair(symbol):
-    data = fetch_klines(symbol, INTERVAL, LIMIT)
-    if not data:
-        print(f"No data for {symbol}")
-        return None
+def calculate_rsi(data, period=9):
+    delta = data.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
-    df = pd.DataFrame(data, columns=[
-        "open_time", "open", "high", "low", "close", "volume",
-        "close_time", "quote_asset_volume", "number_of_trades",
-        "taker_buy_base_asset_volume", "taker_buy_quote_asset_volume", "ignore"
-    ])
+def calculate_macd(data, fast=12, slow=26, signal=9):
+    ema_fast = data.ewm(span=fast, adjust=False).mean()
+    ema_slow = data.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    return macd_line, signal_line
 
-    df["close"] = df["close"].astype(float)
+def check_conditions(pair):
+    df = fetch_klines(pair)
+    if df is None or df.empty:
+        return
 
-    # Calculate RSI
-    df['rsi'] = ta.momentum.rsi(df['close'], window=RSI_PERIOD)
+    close = df['close']
+    rsi = calculate_rsi(close).iloc[-1]
+    macd, signal = calculate_macd(close)
+    macd_curr, signal_curr = macd.iloc[-1], signal.iloc[-1]
 
-    # Calculate MACD
-    macd = ta.trend.MACD(df['close'], window_slow=MACD_SLOW, window_fast=MACD_FAST, window_sign=MACD_SIGNAL)
-    df['macd'] = macd.macd()
-    df['macd_signal'] = macd.macd_signal()
+    if rsi < 30 and macd_curr > signal_curr:
+        alert = f"📈 {pair} - RSI: {rsi:.2f}, MACD Bullish Crossover!"
+        send_alert(alert)
 
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    rsi = latest['rsi']
-    macd_val = latest['macd']
-    macd_signal = latest['macd_signal']
-    prev_macd = prev['macd']
-    prev_macd_signal = prev['macd_signal']
-
-    # Debug prints to console
-    print(f"{symbol} - RSI: {rsi:.2f}, MACD: {macd_val:.4f}, Signal: {macd_signal:.4f}")
-    print(f"Previous MACD: {prev_macd:.4f}, Previous Signal: {prev_macd_signal:.4f}")
-
-    # Condition: RSI oversold and MACD bullish crossover
-    if rsi < RSI_OVERSOLD and prev_macd < prev_macd_signal and macd_val > macd_signal:
-        return f"📈 *{symbol}* is oversold (RSI={rsi:.2f}) and MACD bullish crossover detected."
-
-    return None
-
-def send_telegram_alert(message):
+def send_alert(message):
     try:
-        bot.send_message(chat_id=CHAT_ID, text=message, parse_mode=telegram.ParseMode.MARKDOWN)
-        print("Sent alert:", message)
+        bot.send_message(chat_id=CHAT_ID, text=message)
+        print(f"Sent alert: {message}")
     except Exception as e:
-        print("Error sending Telegram alert:", e)
+        print(f"Failed to send alert: {e}")
 
-def main():
+def main_loop():
+    pairs = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT']
     while True:
-        for pair in PAIRS:
-            print(f"Checking {pair}...")
-            alert_msg = analyze_pair(pair)
-            if alert_msg:
-                send_telegram_alert(alert_msg)
-            else:
-                print(f"No alert for {pair}")
+        for pair in pairs:
+            check_conditions(pair)
+        time.sleep(300)  # 5 minutes
 
-        print("Waiting for next check (15 minutes)...")
-        time.sleep(900)  # wait 15 minutes before next check
-
-if __name__ == "__main__":
-    main()
+# === Start Everything ===
+if __name__ == '__main__':
+    threading.Thread(target=run_flask).start()
+    main_loop()
