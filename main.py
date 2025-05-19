@@ -11,18 +11,31 @@ TELEGRAM_TOKEN = '7935117230:AAFF6FrTTXUP30LXWcoOicKf82S2lkEx_5A'
 CHAT_ID = '383365285'
 bot = telegram.Bot(token=TELEGRAM_TOKEN)
 
-# === Flask Web Server to keep Render Free Tier alive ===
+# === Flask App for Render (keeps service alive) ===
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is running!"
+    return "Crypto Alert Bot is running!"
 
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
 
-# === Crypto Alert Logic ===
+# === Get Top 20 USDT Pairs by Volume ===
+def get_top_20_pairs():
+    url = 'https://api.binance.com/api/v3/ticker/24hr'
+    try:
+        response = requests.get(url, timeout=10)
+        tickers = response.json()
+        usdt_pairs = [t for t in tickers if t['symbol'].endswith('USDT') and not t['symbol'].endswith('BUSD')]
+        sorted_pairs = sorted(usdt_pairs, key=lambda x: float(x['quoteVolume']), reverse=True)
+        top_20 = [t['symbol'] for t in sorted_pairs[:20]]
+        return top_20
+    except:
+        return ['BTCUSDT', 'ETHUSDT', 'BNBUSDT']  # fallback
+
+# === Fetch historical Klines ===
 def fetch_klines(symbol, interval='1h', limit=100):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     try:
@@ -38,7 +51,8 @@ def fetch_klines(symbol, interval='1h', limit=100):
     except:
         return None
 
-def calculate_rsi(data, period=9):
+# === RSI Calculation ===
+def calculate_rsi(data, period=14):
     delta = data.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
@@ -46,6 +60,7 @@ def calculate_rsi(data, period=9):
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
+# === MACD Calculation ===
 def calculate_macd(data, fast=12, slow=26, signal=9):
     ema_fast = data.ewm(span=fast, adjust=False).mean()
     ema_slow = data.ewm(span=slow, adjust=False).mean()
@@ -53,6 +68,7 @@ def calculate_macd(data, fast=12, slow=26, signal=9):
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
     return macd_line, signal_line
 
+# === Alert Logic ===
 def check_conditions(pair):
     df = fetch_klines(pair)
     if df is None or df.empty:
@@ -64,7 +80,7 @@ def check_conditions(pair):
     macd_curr, signal_curr = macd.iloc[-1], signal.iloc[-1]
 
     if rsi < 30 and macd_curr > signal_curr:
-        alert = f"📈 {pair} - RSI: {rsi:.2f}, MACD Bullish Crossover!"
+        alert = f"📊 {pair}\n✅ RSI: {rsi:.2f} (oversold)\n✅ MACD Bullish Crossover"
         send_alert(alert)
 
 def send_alert(message):
@@ -74,14 +90,16 @@ def send_alert(message):
     except Exception as e:
         print(f"Failed to send alert: {e}")
 
+# === Main Bot Loop ===
 def main_loop():
-    pairs = ['BTCUSDT', 'ETHUSDT', 'BNBUSDT']
     while True:
-        for pair in pairs:
+        top_pairs = get_top_20_pairs()
+        print(f"Checking top 20 pairs: {top_pairs}")
+        for pair in top_pairs:
             check_conditions(pair)
-        time.sleep(300)  # 5 minutes
+        time.sleep(300)  # Wait 5 minutes
 
-# === Start Everything ===
+# === Start Bot + Flask ===
 if __name__ == '__main__':
     threading.Thread(target=run_flask).start()
     main_loop()
