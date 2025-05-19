@@ -1,4 +1,5 @@
-pandas
 requests
+pandas
 python-telegram-bot
 flask
+ta-lib

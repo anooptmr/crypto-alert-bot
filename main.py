@@ -1,108 +1,117 @@
 import requests
 import pandas as pd
-import numpy as np
+import talib
+import telegram
 import time
-from datetime import datetime
+from flask import Flask
+from threading import Thread
 
-# Telegram config
-TELEGRAM_TOKEN = "7935117230:AAFF6FrTTXUP30LXWcoOicKf82S2lkEx_5A"
-CHAT_ID = "383365285"
+# Your bot token and chat id
+TELEGRAM_TOKEN = '7935117230:AAFF6FrTTXUP30LXWcoOicKf82S2lkEx_5A'
+CHAT_ID = 383365285
 
-# Binance config
-BASE_URL = "https://api.binance.com"
-INTERVAL = "5m"
-LIMIT = 100
-RSI_PERIOD = 9
-RSI_THRESHOLD = 35
-VOLUME_THRESHOLD = 100000
-PRICE_THRESHOLD = 0.0001
+bot = telegram.Bot(token=TELEGRAM_TOKEN)
 
-def send_alert(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown"
-    }
-    requests.post(url, json=payload)
+app = Flask('')
 
-def get_trending_pairs():
-    try:
-        res = requests.get(f"{BASE_URL}/api/v3/ticker/24hr").json()
-        filtered = [x for x in res if x["symbol"].endswith("USDT")]
-        sorted_by_volume = sorted(filtered, key=lambda x: float(x["quoteVolume"]), reverse=True)
-        return [x["symbol"] for x in sorted_by_volume[:20]]
-    except Exception as e:
-        print("Error fetching trending:", e)
-        return []
+@app.route('/')
+def home():
+    return "Bot is running!"
 
-def fetch_klines(symbol):
-    try:
-        url = f"{BASE_URL}/api/v3/klines"
-        params = {"symbol": symbol, "interval": INTERVAL, "limit": LIMIT}
-        data = requests.get(url, params=params).json()
-        return data
-    except Exception as e:
-        print("Error fetching klines:", e)
+def run():
+    app.run(host='0.0.0.0', port=10000)
+
+def start_flask():
+    t = Thread(target=run)
+    t.start()
+
+def fetch_binance_klines(symbol, interval='5m', limit=100):
+    url = f'https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}'
+    res = requests.get(url)
+    if res.status_code == 200:
+        data = res.json()
+        df = pd.DataFrame(data, columns=[
+            'open_time', 'open', 'high', 'low', 'close', 'volume',
+            'close_time', 'quote_asset_volume', 'number_of_trades',
+            'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'
+        ])
+        df['close'] = df['close'].astype(float)
+        df['volume'] = df['volume'].astype(float)
+        return df
+    else:
+        print(f"Failed to fetch klines for {symbol}")
         return None
 
-def calculate_rsi(prices, period=RSI_PERIOD):
-    delta = np.diff(prices)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=period).mean()
-    avg_loss = pd.Series(loss).rolling(window=period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.iloc[-1] if not rsi.empty else None
+def get_rsi_macd(df):
+    close = df['close'].values
+    rsi = talib.RSI(close, timeperiod=9)
+    macd, macd_signal, macd_hist = talib.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)
+    return rsi[-1], macd[-1], macd_signal[-1]
 
-def calculate_macd(prices):
-    prices = pd.Series(prices)
-    ema12 = prices.ewm(span=12, adjust=False).mean()
-    ema26 = prices.ewm(span=26, adjust=False).mean()
-    macd = ema12 - ema26
-    signal = macd.ewm(span=9, adjust=False).mean()
-    return macd.iloc[-1], signal.iloc[-1]
+def send_telegram_message(text):
+    try:
+        bot.send_message(chat_id=CHAT_ID, text=text)
+        print(f"Sent alert: {text}")
+    except Exception as e:
+        print(f"Telegram send failed: {e}")
 
-def analyze():
-    trending = get_trending_pairs()
-    for symbol in trending:
-        klines = fetch_klines(symbol)
-        if not klines or len(klines) < RSI_PERIOD:
-            continue
+def fetch_binance_top_symbols(limit=20):
+    # Binance API to get top symbols by volume in last 24h (spot market)
+    url = 'https://api.binance.com/api/v3/ticker/24hr'
+    res = requests.get(url)
+    if res.status_code == 200:
+        data = res.json()
+        # Filter only USDT pairs & sort by quote volume desc
+        usdt_pairs = [d for d in data if d['symbol'].endswith('USDT')]
+        sorted_pairs = sorted(usdt_pairs, key=lambda x: float(x['quoteVolume']), reverse=True)
+        top_symbols = [d['symbol'] for d in sorted_pairs[:limit]]
+        return top_symbols
+    else:
+        print("Failed to fetch top symbols")
+        return []
 
-        closes = [float(k[4]) for k in klines]
-        volumes = [float(k[5]) * float(k[4]) for k in klines]  # quote volume
-        current_price = closes[-1]
-        current_volume = volumes[-1]
+def main_loop():
+    start_flask()  # start flask server for uptime
 
-        if current_volume < VOLUME_THRESHOLD or current_price < PRICE_THRESHOLD:
-            continue
-
-        rsi = calculate_rsi(closes)
-        if rsi is None or rsi > RSI_THRESHOLD:
-            continue
-
-        macd, signal = calculate_macd(closes)
-        if macd < signal:
-            continue
-
-        msg = (
-            f"📢 *Signal Found!*\n"
-            f"Symbol: `{symbol}`\n"
-            f"Price: ${current_price:.6f}\n"
-            f"RSI(9): {rsi:.2f} ✅\n"
-            f"MACD: {macd:.5f} > Signal: {signal:.5f} ✅\n"
-            f"Volume(5m): ${current_volume:,.0f}"
-        )
-        send_alert(msg)
-        print(f"✅ Alert sent for {symbol}")
-
-if __name__ == "__main__":
     while True:
-        print(f"\n🔁 Scanning @ {datetime.now().strftime('%H:%M:%S')}")
         try:
-            analyze()
+            symbols = fetch_binance_top_symbols(limit=20)
+            for symbol in symbols:
+                df = fetch_binance_klines(symbol)
+                if df is None or len(df) < 35:
+                    continue
+
+                rsi, macd, macd_signal = get_rsi_macd(df)
+                price = df['close'].iloc[-1]
+                volume = df['volume'].iloc[-1] * price  # volume in USDT approx
+
+                # Filters
+                if price < 0.0001:
+                    continue
+                if volume < 100000:  # volume > $100,000
+                    continue
+                # RSI oversold condition
+                if rsi > 35:
+                    continue
+                # MACD bullish crossover (macd crosses above signal)
+                prev_macd, prev_signal = get_rsi_macd(df[:-1])[1:3]
+                if not (prev_macd < prev_signal and macd > macd_signal):
+                    continue
+
+                alert_text = (
+                    f"🚀 Potential Buy Alert for {symbol}!\n"
+                    f"Price: ${price:.6f}\n"
+                    f"RSI(9): {rsi:.2f} (Oversold < 35)\n"
+                    f"MACD: {macd:.6f} crossed above Signal: {macd_signal:.6f}\n"
+                    f"Volume(5m): ${volume:,.2f}\n"
+                    f"https://www.binance.com/en/trade/{symbol}"
+                )
+                send_telegram_message(alert_text)
+                time.sleep(3)  # avoid spamming API & telegram too fast
         except Exception as e:
-            print("Error:", e)
-        time.sleep(300)  # run every 5 mins
+            print(f"Error in main loop: {e}")
+
+        time.sleep(300)  # wait 5 minutes before next check
+
+if __name__ == '__main__':
+    main_loop()
