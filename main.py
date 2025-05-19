@@ -1,73 +1,61 @@
-import ccxt
-import pandas as pd
-from ta.momentum import RSIIndicator
-from ta.trend import MACD
-import telegram
-import os
+import requests
 
-# Telegram config - set these as environment variables on Render or locally
-TELEGRAM_TOKEN = os.environ.get('7935117230:AAFF6FrTTXUP30LXWcoOicKf82S2lkEx_5A')
-CHAT_ID = os.environ.get('383365285')
+# --- CONFIGURATION ---
+TELEGRAM_TOKEN = "7935117230:AAFF6FrTTXUP30LXWcoOicKf82S2lkEx_5A"
+CHAT_ID = "383365285"
+DEX_SCREENER_URL = "https://api.dexscreener.com/latest/dex/pairs"
 
-bot = telegram.Bot(token=7935117230:AAFF6FrTTXUP30LXWcoOicKf82S2lkEx_5A)
+# --- SAFETY THRESHOLDS ---
+MIN_VOLUME_USD = 500_000
+MIN_MARKET_CAP_USD = 1_000_000
 
-# Exchange config
-EXCHANGE = ccxt.binance()
+# --- ALERT FUNCTION ---
+def send_telegram_alert(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": message
+    }
+    res = requests.post(url, data=payload)
+    print(f"Sent alert: {res.status_code}")
 
-# List of pairs to check
-SYMBOLS = ['WIF/USDT', 'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'LINK/USDT']
+# --- MAIN SCRIPT ---
+def check_tokens():
+    response = requests.get(DEX_SCREENER_URL)
+    if response.status_code != 200:
+        print("Failed to fetch data")
+        return
 
-# RSI and MACD settings
-RSI_PERIOD = 9
-RSI_OVERSOLD = 30
+    data = response.json()
 
-def fetch_ohlcv(symbol, timeframe='5m', limit=100):
-    """Fetch OHLCV data from Binance"""
-    data = EXCHANGE.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    return df
+    for token in data.get("pairs", []):
+        name = token.get("baseToken", {}).get("name", "Unknown")
+        symbol = token.get("baseToken", {}).get("symbol", "???")
+        volume_24h = float(token.get("volume", {}).get("h24", 0))
+        market_cap = float(token.get("fdv", 0))
 
-def calculate_indicators(df):
-    """Calculate RSI and MACD"""
-    rsi_indicator = RSIIndicator(df['close'], window=RSI_PERIOD)
-    df['rsi'] = rsi_indicator.rsi()
+        # --- SAFETY FILTERS ---
+        if volume_24h < MIN_VOLUME_USD or market_cap < MIN_MARKET_CAP_USD:
+            continue
 
-    macd_indicator = MACD(df['close'])
-    df['macd'] = macd_indicator.macd()
-    df['macd_signal'] = macd_indicator.macd_signal()
-    return df
+        # --- PLACEHOLDER INDICATOR CHECKS ---
+        # Replace these with actual RSI and MACD logic
+        rsi = 28  # sample test value
+        macd_signal = True  # sample trigger
 
-def check_signals(df):
-    """Check if RSI < 30 and MACD crosses over"""
-    latest = df.iloc[-1]
-    prev = df.iloc[-2]
+        if rsi < 30 and macd_signal:
+            message = f"""
+📈 *Trade Signal!*
+Token: {name} ({symbol})
+RSI: {rsi}
+Volume (24h): ${volume_24h:,.0f}
+Market Cap: ${market_cap:,.0f}
+👉 Meets RSI & MACD condition.
+"""
+            send_telegram_alert(message)
 
-    rsi_oversold = latest['rsi'] < RSI_OVERSOLD
-    macd_cross = (prev['macd'] < prev['macd_signal']) and (latest['macd'] > latest['macd_signal'])
+# --- TEST MESSAGE ON STARTUP ---
+send_telegram_alert("✅ Test alert from your crypto bot! Deployment is working.")
 
-    return rsi_oversold and macd_cross
-
-def send_telegram_message(text):
-    bot.send_message(chat_id=383365285, text=text)
-
-def main():
-    for symbol in SYMBOLS:
-        print(f"Checking {symbol}...")
-        try:
-            df = fetch_ohlcv(symbol)
-            df = calculate_indicators(df)
-            if check_signals(df):
-                message = (f"🚨 Signal detected for {symbol}!\n"
-                           f"RSI({RSI_PERIOD}): {df.iloc[-1]['rsi']:.2f} (Below {RSI_OVERSOLD})\n"
-                           f"MACD: {df.iloc[-1]['macd']:.5f} > Signal: {df.iloc[-1]['macd_signal']:.5f}\n"
-                           f"Time: {df.iloc[-1]['timestamp']}")
-                send_telegram_message(message)
-                print(f"Alert sent for {symbol}")
-            else:
-                print(f"No signal for {symbol}")
-        except Exception as e:
-            print(f"Error checking {symbol}: {e}")
-
-if __name__ == "__main__":
-    main()
+# --- RUN MAIN FUNCTION ---
+check_tokens()
